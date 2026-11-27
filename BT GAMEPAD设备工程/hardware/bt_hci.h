@@ -336,4 +336,9 @@ void     bt_app_drop_bond(void);         /* 作废绑定：擦 Flash + 允许重
  * 以及 HID Control 通道的 SET_REPORT 请求。 */
 void     bt_app_on_output_report(const uint8_t *p, uint16_t len);
 
+/* 特性报告（Report ID 5）：上位机读取或保存左右摇杆灵敏度与死区。
+ * GET 返回 [Report ID][16 字节配置]，SET 输入同样包含 Report ID。 */
+uint16_t bt_app_on_get_report(uint8_t type, uint8_t id, uint8_t *out, uint16_t cap);
+uint8_t  bt_app_on_feature_report(const uint8_t *p, uint16_t len);
+
 #endif /* __BT_HCI_H */

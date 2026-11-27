@@ -12,6 +12,7 @@
 #include <joystick.h>
 #include <key.h>
 #include <tim2.h>
+#include <gp_config.h>
 #include <usb_board.h>      /* hal_time_ms()：1ms 时基（TIM4 提供） */
 
 /* ==========================================================================
@@ -234,18 +235,13 @@ void bt_app_on_encrypted(void)
 /* ==========================================================================
  * 手柄报告
  * ========================================================================== */
-static uint16_t adc_to_u16(uint16_t v)
-{
-    /* ADC 0..4095 → 0..65535，中位 2048 → 32768 */
-    return (uint16_t)((uint32_t)v * 16u);
-}
-
 static void build_report(uint8_t rpt[17])
 {
-    const uint16_t rawLX = adc_to_u16(Joystick_ReadAxis(JOYSTICK_LX));
-    const uint16_t rawLY = adc_to_u16(Joystick_ReadAxis(JOYSTICK_LY));
-    const uint16_t rawRX = adc_to_u16(Joystick_ReadAxis(JOYSTICK_RX));
-    const uint16_t rawRY = adc_to_u16(Joystick_ReadAxis(JOYSTICK_RY));
+    /* 默认 100% / 死区 0 时仍走原 raw*16 路径；自定义参数使用校准中点重映射。 */
+    const uint16_t rawLX = GPConfig_AdjustAxis(JOYSTICK_LX, Joystick_ReadAxis(JOYSTICK_LX));
+    const uint16_t rawLY = GPConfig_AdjustAxis(JOYSTICK_LY, Joystick_ReadAxis(JOYSTICK_LY));
+    const uint16_t rawRX = GPConfig_AdjustAxis(JOYSTICK_RX, Joystick_ReadAxis(JOYSTICK_RX));
+    const uint16_t rawRY = GPConfig_AdjustAxis(JOYSTICK_RY, Joystick_ReadAxis(JOYSTICK_RY));
 
     /* 电位器相对 PCB 旋转了 90°（与 joystick.c 的 JOY_ROTATE_90 一致）：
      * 水平 = 原 Y 通道，竖直 = 原 X 通道。
@@ -444,6 +440,21 @@ void bt_app_on_output_report(const uint8_t *p, uint16_t len)
     rgb_apply(p[2], p[3], p[4]);
 }
 
+uint16_t bt_app_on_get_report(uint8_t type, uint8_t id, uint8_t *out, uint16_t cap)
+{
+    if ((type != 0x03u) || (id != GP_CONFIG_REPORT_ID)) { return 0u; }
+    return GPConfig_GetFeature(out, cap);
+}
+
+uint8_t bt_app_on_feature_report(const uint8_t *p, uint16_t len)
+{
+    if ((p == NULL) || (len < GP_CONFIG_SIZE + 1u) || (p[0] != GP_CONFIG_REPORT_ID))
+    {
+        return 0u;
+    }
+    return GPConfig_SetFeature(&p[1], (uint16_t)(len - 1u));
+}
+
 /* ==========================================================================
  * 初始化
  * ========================================================================== */
@@ -452,6 +463,7 @@ void BT_Init(void)
     uint8_t ok;
 
     bt_l2cap_reset();
+    GPConfig_Init();
 
     /* 开机时按住 A 键 = 清除绑定。
      * 换电脑、电脑重装、配对状态乱了的时候用得上，
@@ -526,6 +538,9 @@ void BT_Task(void)
 
     /* 1. 收包（必须每轮跑，不能有毫秒级阻塞） */
     bt_transport_poll();
+
+    /* SET_REPORT 已应答后才在任务上下文擦写配置页，避免阻塞控制回调。 */
+    GPConfig_Process();
 
     /* 1.5 连上之后周期报一次通道状态，方便定位卡在哪个通道 */
     if (g_conn_handle != BT_HANDLE_NONE)

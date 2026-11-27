@@ -290,21 +290,29 @@ static void hidp_control_rsp(uint16_t cid, const uint8_t *p, uint16_t len)
     uint8_t param;
     uint8_t rsp;
 
-    if (len < 1u)
-    {
-        return;
-    }
+    if (len < 1u) { return; }
 
     hdr   = p[0];
     txn   = (uint8_t)((hdr >> 4) & 0x0Fu);
     param = (uint8_t)(hdr & 0x0Fu);
 
+    /* Report ID 5 的配置报告由 HID Control 通道传输，不能挤占输入通道。 */
+    if ((txn == 0x2u) && (param == 0x03u) && (len >= 2u) && (p[1] == 0x05u))
+    {
+        uint8_t report[18];
+        const uint16_t n = bt_app_on_get_report(param, p[1], &report[1], 17u);
+        if (n == 17u)
+        {
+            report[0] = 0xA3u;       /* DATA | Feature：应答类型必须与请求一致 */
+            l2cap_send(cid, report, 18u);
+            UART1_SendString("[cfg] GET_REPORT id=5 -> 16B config\r\n");
+            return;
+        }
+    }
+
     switch (txn)
     {
         case 0x2u:                       /* GET_REPORT */
-            /* 本机没有特性报告，报告描述符走 SDP 下发，不走这里。
-             * 回 ERR_UNSUPPORTED_REQ 比"不回"好得多：主机拿到明确答复，
-             * 会继续走后续流程，而不是干等超时。 */
             UART1_Printf("[hid] GET_REPORT type=%u rid=%u -> NAK\r\n",
                          (unsigned)param,
                          (unsigned)((len >= 2u) ? p[1] : 0u));
@@ -320,31 +328,22 @@ static void hidp_control_rsp(uint16_t cid, const uint8_t *p, uint16_t len)
             break;
 
         case 0x3u:                       /* SET_REPORT */
-            /* 参数 1 = 输入报告，2 = 输出报告，3 = 特性报告。
-             * 只有输出报告带数据，格式 [头][Report ID][报告数据…]，
-             * 和 Interrupt 通道 0xA2 后面那段一样。 */
+        case 0x5u:                       /* Windows 也使用事务码 5 下发 SET_REPORT */
+            rsp = 0x00u;
             if ((param == 0x02u) && (len >= 2u))
             {
+                /* RGB 输出报告保持原路径，不在 Interrupt 通道周期写入。 */
                 bt_app_on_output_report(&p[1], (uint16_t)(len - 1u));
             }
-            rsp = 0x00u;                 /* HANDSHAKE：成功 */
-            break;
-
-        case 0x5u:                       /* SET_PROTOCOL，以及 Windows 的 SET_REPORT(Output) 0x52 */
-            /* 蓝牙 HID 上 Windows 的 HidD_SetOutputReport 发的是 0x52：
-             * 事务码 5、参数 2(Output)，后面直接跟 [Report ID][报告数据…]，
-             * 与 Interrupt 通道 0xA2 的载荷完全同构。
-             * 旧代码把 0x52 一律当 SET_PROTOCOL 只回 HANDSHAKE，RGB 全丢，
-             * 于是上位机只能改走 Interrupt 通道 WriteFile；而实测持续往
-             * Interrupt 通道写会让 hidbth 把同通道的输入报告挂起约 900ms，
-             * 表现为彩虹动画期间摇杆/按键卡住、界面误报"链路超时"。
-             * 这里补上解析，让灯效走控制通道，输入报告完全不受影响。
-             * 真正的 SET_PROTOCOL 参数只会是 0(Boot)/1(Report)，不会误入。 */
-            if ((param == 0x02u) && (len >= 2u))
+            else if (param == 0x03u)
             {
-                bt_app_on_output_report(&p[1], (uint16_t)(len - 1u));
+                rsp = bt_app_on_feature_report(&p[1], (uint16_t)(len - 1u))
+                      ? 0x00u : 0x04u;
             }
-            rsp = 0x00u;                 /* HANDSHAKE：成功 */
+            else if ((txn == 0x3u) && (param > 0x01u))
+            {
+                rsp = 0x04u;
+            }
             break;
 
         case 0x1u:                       /* HID_CONTROL */
